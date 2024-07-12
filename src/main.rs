@@ -1,28 +1,16 @@
 use dotenv::dotenv;
-use reqwest;
-use serde::{Deserialize, Serialize};
 use tokio;
-use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, Result as SqliteResult};
+use rusqlite::{Connection, Result as SqliteResult};
 use std::env;
-use std::path::PathBuf;
+use thirtyfour::prelude::*;
 
 
-// Define the Post struct
-#[derive(Debug, Serialize, Deserialize)]
-struct Post {
-    id: String,
-    caption: Option<String>,
-    media_type: String,
-    timestamp: DateTime<Utc>,
-    like_count: i32,
-    comments_count: i32,
-}
 
-// Define the InstagramAnalyzer struct
-struct InstagramAnalyzer {
-    client: reqwest::Client,
-    access_token: String,
+
+// Define the InstaaGram Scraper struct
+struct InstagramScraper {
+    username: String,
+    password: String,
     db_conn: Connection,
 }
 
@@ -33,114 +21,84 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //Load the dotenv file from the current directory
     dotenv().ok();
 
-    // Get the access token of the user from the .env, throw an error if it doesn't exist
-    let access_token = env::var("INSTAGRAM_KEY").expect("INSTAGRAM_KEY must be set with the .env file");
-    
+    //Get Username
+    let insta_user = env::var("username").expect("Password must be set in the .env file");
+
+    //Get Password
+    let insta_pass = env::var("password").expect("Username must be set in the .env file");
+
     // Get path to DB
-    let db_path_str = "./instagram_analyzer.db";
+    let db_path_str = format!("./{}_data.db", insta_user);
 
     // Create a new instance of the Instagram Analyzer object, the ? will return early from the function if there is an error
-    let analyzer = InstagramAnalyzer::new(access_token, db_path_str).await?;
+    let analyzer = InstagramScraper::new(insta_user, insta_pass, db_path_str).await?;
 
-    // Initialize DB if it does not exist
+    // Initialize DB tables if they do not exist
     analyzer.init_db()?;
 
-    // This is an async function so we must use the .await for error handling
-    let posts = analyzer.get_user_posts().await?;
+    analyzer.navigate().await?; 
 
-    // Store posts and pass the reference so we don't move post data in memory
-    analyzer.store_posts(&posts).await?;
-
-    // Calculate engagement rate from analyzer's method
-    let engagement_rate = analyzer.calculate_engagement_rate().await?;
-    println!("Engagement Rate is: {:.2}", engagement_rate);
     // Return as a success
     Ok(())
 }
 
 // Create the Instagram Analyzer struct
-impl InstagramAnalyzer {
-    //Constructor
-    async fn new(access_token: String, db_url: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        // Create HTTP Client
-        let client = reqwest::Client::new();
-
-        // Setup DB connection to db_url with 5 max connections
+impl InstagramScraper {
+    async fn new(username: String, password: String, db_url: String) -> Result<Self, Box<dyn std::error::Error>> {
         let db_conn = Connection::open(db_url)?;
 
-        Ok(InstagramAnalyzer{
-            client,
-            access_token,
+        Ok(InstagramScraper {
+            username,
+            password,
             db_conn,
         })
-      
-    }
-    
-    // Fetch user posts from Instagram
-    async fn get_user_posts(&self) -> Result<Vec<Post>, Box<dyn std::error::Error>> {
-        // Fetch the data from the 'me/media' endpoint
-        let data = self.fetch_data("me/media").await?;
-
-        // Parse the JSON data into a Vec<Post>
-        let posts: Vec<Post> = serde_json::from_value(data["data"].clone())?;
-
-        Ok(posts)
     }
 
-    // Fetch data from the Instagram API
-    async fn fetch_data(&self, endpoint: &str) -> Result<serde_json::Value, reqwest::Error> {
-        // Construct the full URL for the API request/
-        let url = format!("https://graph.instagram.com/{}", endpoint);
+    async fn navigate(&self) -> Result<(), WebDriverError> {
+        let caps = DesiredCapabilities::chrome();
+        // caps.add_chrome_arg("--headless")?;
+        // caps.add_chrome_arg("--disable-gpu")?;
+        let driver = WebDriver::new("http://localhost:9515", caps).await?;
 
-        // Send a GET request to the API with the access token in the query parameters
-        // Then parse the response as JSON
-        let response = self.client
-            .get(&url)
-            .query(&[("access_token", &self.access_token)])
-            .send()
-            .await?
-            .json()
-            .await?;
+        driver.goto("https://www.instagram.com").await?;
 
-        Ok(response)
-    }
+        let username_element = driver.find(By::Name("username")).await?;
+        username_element.wait_until().displayed().await?;
+        username_element.send_keys(&self.username).await?;
 
-    // Store posts in the database
-    async fn store_posts(&self, posts: &[Post]) -> Result<(), Box<dyn std::error::Error>> {
-        for post in posts {
-            self.db_conn.execute(
-                "INSERT OR REPLACE INTO posts (id, caption, media_type, timestamp, like_count, comments_count) 
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    &post.id,
-                    &post.caption,
-                    &post.media_type,
-                    post.timestamp.timestamp(),
-                    post.like_count,
-                    post.comments_count
-                ],
-            )?;
-        }
+        let password_element = driver.find(By::Name("password")).await?;
+        password_element.wait_until().displayed().await?;
+        password_element.send_keys(&self.password).await?;
+
+        let submit_button = driver.find(By::XPath("//button[@type='submit']")).await?;
+        submit_button.wait_until().clickable().await?;
+        submit_button.click().await?;
+
+        driver.quit().await?;
         Ok(())
-    }
-
-    async fn calculate_engagement_rate(&self) -> Result<f64, Box<dyn std::error::Error>> {
-        let mut stmt = self.db_conn.prepare(
-            "SELECT AVG(like_count + comments_count) as avg_engagement FROM posts"
-        )?;
-        let avg_engagement: f64 = stmt.query_row([], |row| row.get(0))?;
-        Ok(avg_engagement)
     }
 
     fn init_db(&self) -> SqliteResult<()> {
         self.db_conn.execute(
-            "CREATE TABLE IF NOT EXISTS posts (
+            "CREATE TABLE IF NOT EXISTS macro_data (
                 id TEXT PRIMARY KEY,
                 caption TEXT,
                 media_type TEXT,
                 timestamp INTEGER,
                 like_count INTEGER,
                 comments_count INTEGER
+            )",
+            [],
+        )?;
+        self.db_conn.execute(
+            "CREATE TABLE IF NOT EXISTS follower_data (
+                username TEXT PRIMARY KEY
+            )",
+            [],
+        )?;
+        self.db_conn.execute(
+            "CREATE TABLE IF NOT EXISTS following_data (
+                username TEXT PRIMARY KEY
             )",
             [],
         )?;
