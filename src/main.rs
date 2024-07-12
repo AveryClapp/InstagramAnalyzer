@@ -3,8 +3,8 @@ use tokio;
 use rusqlite::{Connection, Result as SqliteResult};
 use std::env;
 use thirtyfour::prelude::*;
-
-
+use std::time::Duration;
+use std::collections::HashSet;
 
 
 // Define the InstaaGram Scraper struct
@@ -55,9 +55,9 @@ impl InstagramScraper {
     }
 
     async fn navigate(&self) -> Result<(), WebDriverError> {
-        let caps = DesiredCapabilities::chrome();
+        let mut caps = DesiredCapabilities::chrome();
         // caps.add_chrome_arg("--headless")?;
-        // caps.add_chrome_arg("--disable-gpu")?;
+        caps.add_chrome_arg("--disable-gpu")?;
         let driver = WebDriver::new("http://localhost:9515", caps).await?;
 
         driver.goto("https://www.instagram.com").await?;
@@ -71,11 +71,38 @@ impl InstagramScraper {
         password_element.send_keys(&self.password).await?;
 
         let submit_button = driver.find(By::XPath("//button[@type='submit']")).await?;
-        submit_button.wait_until().clickable().await?;
+        submit_button.wait_until().displayed().await?;
         submit_button.click().await?;
+        
+        //Log in to instagram
+        tokio::time::sleep(Duration::from_secs(5)).await;
 
-        driver.quit().await?;
+        // Navigate to page of followers
+        driver.goto(format!("https://www.instagram.com/{}/followers/", &self.username)).await?;
+        
+        let mut users = HashSet::new();
+        while users.len() < 1000 {
+            let followers = driver.find_all(By::XPath("//a[contains(@href, '/')]")).await?;
+    
+            for follower in followers {
+                if let Ok(Some(href)) = follower.attr("href").await {
+                    let username = href.split("/").nth(3).unwrap_or("").to_string();
+                    if !username.is_empty() {
+                        users.insert(username);
+                    }
+                }
+            }
+    
+            driver.execute(
+                "window.scrollTo(0, document.body.scrollHeight)",
+                vec![]
+            ).await?;
+    
+            // Wait for content to load
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
         Ok(())
+        
     }
 
     fn init_db(&self) -> SqliteResult<()> {
